@@ -1,1 +1,5 @@
-# requirements.txt content
+# requirements.txt
+aiogram
+aiohttp
+requests
+python-dotenv
