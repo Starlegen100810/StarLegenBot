@@ -1,3 +1,4 @@
-pyTelegramBotAPI==4.16.1
-Flask
-requests
+aiogram==2.25.1
+aiohttp==3.8.1
+requests==2.31.0
+python-dotenv==1.0.0
