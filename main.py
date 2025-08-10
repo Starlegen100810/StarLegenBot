@@ -1,4 +1,4 @@
-mport random
+import random
 import os
 import time
 import textwrap
@@ -10,6 +10,14 @@ import telebot
 from telebot import types
 import requests
 from flask import Flask, request, abort
+# ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
+
+def to_int(val):
+    try:
+        return int(str(val).strip())
+    except Exception:
+        return None
+
 
 # --- Config / Bot ---
 TOKEN = "7198636747:AAEUNsaiMZXweWcLZoQcxocZKKLhxapCszM"  # եթե արդեն վերևում ունես, սա պահիր նույնը
