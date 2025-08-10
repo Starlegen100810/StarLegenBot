@@ -1,4 +1,6 @@
-aiogram
-aiohttp
+pyTelegramBotAPI==4.16.1
+Flask
 requests
+aiofiles
+aiogram==2.25.1
 python-dotenv
