@@ -1,0 +1,4 @@
+[
+  { "code": "WELCOME5", "percent": 5, "active": true, "max_uses": 100, "used": 0 },
+  { "code": "VIP10",     "percent": 10, "active": false, "max_uses": 50,  "used": 0 }
+]
