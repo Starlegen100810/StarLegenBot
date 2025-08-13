@@ -995,9 +995,8 @@ def set_webhook():
     except Exception as e:
         print("setWebhook error:", e)
 
-if __name__ == "__main__":
-    print("Bot started with WEBHOOK:", WEBHOOK_URL)
+if name == "main":
+    print(f"Бот запустился с WEBHOOK: {WEBHOOK_URL}")
     set_webhook()
-    # Flask սերվերը՝ Render-ի պահանջած PORT-ից
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    приложение.бегать(хозяин="0.0.0.0", порт=порт)
+
