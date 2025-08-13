@@ -1,13 +1,22 @@
-BOT_TOKEN = "7198636747:AAEUNsaiMZXweWcLZoQcxocZKKLhxapCszM"
-ADMIN_ID = 6822052289
-admin_list = [6822052289]
-WEBHOOK_HOST = "" https://babyangelsbot08.onrender.com
+# config.py — միայն կոնֆիգ
+import os
+
+# Bot token — պահիր Env Var-ում (Render/Railway):
+# TELEGRAM_TOKEN
+BOT_TOKEN = os.getenv( "7198636747:AAEUNsaiMZXweWcLZoQcxocZKKLhxapCszM", "").strip()
+
+# Հոսթը ավտոմատ վերցնենք հարթակից.
+# Render → RENDER_EXTERNAL_URL, Railway → RAILWAY_PUBLIC_DOMAIN
+_render = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+_rail   = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+
+if _render:
+    WEBHOOK_HOST = f"https://{_render.replace('https://', '').replace('http://','')}"
+elif _rail:
+    WEBHOOK_HOST = f"https://{_rail.replace('https://', '').replace('http://','')}"
+else:
+    # fallback՝ եթե վերևից ոչինչ չկա, դնում ենք ձեռքով (ՓՈԽԱՐԻՆԵԼ քո դոմեյնով)
+    WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://<your-app>.up.railway.app").strip()
+
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL  = WEBHOOK_HOST + WEBHOOK_PATH
-HOST = "0.0.0.0"
-PORT = 10000
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-MEDIA_DIR  = os.path.join(BASE_DIR, "products")
-BUNNY_IMG  = os.path.join(BASE_DIR, "bunny.jpg")
-
-DEFAULT_LANG = "hy"  # hy / ru / en
