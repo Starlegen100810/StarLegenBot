@@ -12,8 +12,6 @@ import requests
 from flask import Flask, request, abort
 # ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
 from config import BOT_TOKEN
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
 def to_int(val):
     try:
         return int(str(val).strip())
@@ -997,12 +995,6 @@ def set_webhook():
     except Exception as e:
         print("setWebhook error:", e)
 
-if name == "main":
-    from telegram.ext import Application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Ավելացրու քո բոլոր handlers-ները այստեղ...
-    # օրինակ՝ application.add_handler(CommandHandler("start", start))
-    
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    bot.infinity_polling(skip_pending=True, timeout=10, long_polling_timeout=30)
+
 
