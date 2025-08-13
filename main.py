@@ -951,23 +951,6 @@ def check_cart_reminders():
                 del user_cart_time[user_id]
         time.sleep(600)  # ստուգի ամեն 10 րոպեն մեկ
 threading.Thread(target=check_cart_reminders, daemon=True).start()
-if __name__ == "__main__":
-    print("Bot started…")
-    bot.remove_webhook()
-    time.sleep(1)
-
-    # keep polling, auto-retry on errors
-# ---- 24/7 Webhook for Render ----
-
-# եթե TOKEN-ը վերևում ունես, սա անտեսիր.
-# TOKEN = os.getenv("TELEGRAM_TOKEN", "Քո_Token-ը_այստեղ")
-
-app = Flask(__name__)
-WEBHOOK_PATH = f"/webhook/{TOKEN}"                 # գաղտնի ուղի
-BASE_URL = f"https://{os.getenv('RENDER_EXTERNAL_URL','localhost')}"  # Render-ը սա տալիս է env-ում
-WEBHOOK_URL = BASE_URL + WEBHOOK_PATH
-
-# առողջության ստուգում Render-ի համար
 @app.get("/")
 def health():
     return "ok", 200
@@ -994,8 +977,6 @@ def set_webhook():
         print("setWebhook:", r.json())
     except Exception as e:
         print("setWebhook error:", e)
-
-
 if name == "main":
     print("Bot starting with WEBHOOK:", WEBHOOK_URL)
     set_webhook()
