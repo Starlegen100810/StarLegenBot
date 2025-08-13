@@ -11,7 +11,9 @@ from telebot import types
 import requests
 from flask import Flask, request, abort
 # ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
-
+from config import BOT_TOKEN
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 def to_int(val):
     try:
         return int(str(val).strip())
