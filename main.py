@@ -983,11 +983,11 @@ def telegram_webhook():
 
 def set_webhook():
     try:
-        # նախ հներին անջատենք
-        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=10)
-        # նոր webhook՝
+        # remove old
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
+        # set new
         r = requests.get(
-            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
             params={"url": WEBHOOK_URL, "drop_pending_updates": True},
             timeout=10,
         )
@@ -995,6 +995,10 @@ def set_webhook():
     except Exception as e:
         print("setWebhook error:", e)
 
-    bot.infinity_polling(skip_pending=True, timeout=10, long_polling_timeout=30)
 
+if name == "main":
+    print("Bot starting with WEBHOOK:", WEBHOOK_URL)
+    set_webhook()
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
 
