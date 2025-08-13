@@ -996,7 +996,11 @@ def set_webhook():
         print("setWebhook error:", e)
 
 if name == "main":
-    print(f"Бот запустился с WEBHOOK: {WEBHOOK_URL}")
-    set_webhook()
-    приложение.бегать(хозяин="0.0.0.0", порт=порт)
+    from telegram.ext import Application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Ավելացրու քո բոլոր handlers-ները այստեղ...
+    # օրինակ՝ application.add_handler(CommandHandler("start", start))
+    
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
