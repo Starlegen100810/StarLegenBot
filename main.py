@@ -1,18 +1,495 @@
-import random
 import os
+import re
 import time
+import json
+import glob
+import random
 import textwrap
 import threading
-import datetime
-from datetime import datetime as dt
-import os, json, glob
+import requests
+from datetime import datetime
+from flask import Flask, request, abort
 import telebot
 from telebot import types
-import requests
-from flask import Flask, request, abort
-from flask import Flask
+app = Flask(__name__)
 
-app = Flask(__name__) 
+TOKEN    = os.getenv("BOT_TOKEN") or "7198636747:AAHnVEbRGQBkAomBYvHag3Nh_i7Tap6Lnac" 
+ADMIN_ID = int(os.getenv("ADMIN_ID") or "6822052289")      # քո user id
+# Single bot instance
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+
+# Admin check
+ADMIN_IDS = {ADMIN_ID}
+def is_admin(m) -> bool:
+    try:
+        return int(m.from_user.id) in ADMIN_IDS
+    except Exception:
+        return False
+
+# Webhook
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL  = f"https://babyangelsbot08.onrender.com{WEBHOOK_PATH}"
+
+# --- Config / Bot ---
+def is_admin(m) -> bool:
+    try:
+        # your own function (if exists)
+        if '_is_admin' in globals(): 
+            try: 
+                return bool(_is_admin(m))
+            except: 
+                pass
+        # set of ids
+        if 'ADMIN_IDS' in globals():
+            if int(m.from_user.id) in set(int(x) for x in ADMIN_IDS):
+                return True
+        # list of ids
+        if 'admin_list' in globals():
+            if int(m.from_user.id) in [int(x) for x in admin_list]:
+                return True
+        # single id
+        if 'ADMIN_ID' in globals():
+            if int(m.from_user.id) == int(ADMIN_ID):
+                return True
+    except:
+        pass
+    return False
+
+# --- files & dirs ---
+BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+USERS_FILE   = os.path.join(DATA_DIR, "users.json")      # [ids]
+EVENTS_FILE  = os.path.join(DATA_DIR, "events.jsonl")    # json lines
+PAY_FILE     = os.path.join(DATA_DIR, "payments.json")   # {pay_id: {...}}
+COUPON_FILE  = os.path.join(DATA_DIR, "coupons.json")    # {user_id: balance}
+INVITES_FILE = os.path.join(DATA_DIR, "invites.json")    # {"ref_map":{}, "count":{}}
+
+def _load(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return default
+
+def _save(path, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+def _append_event(kind, uid=None, meta=None):
+    rec = {"ts": int(time.time()), "kind": kind, "user_id": int(uid) if uid else None, "meta": meta or {}}
+    try:
+        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except:
+        pass
+# --- users registry (for broadcast/stats) ---
+def _users() -> set: return set(_load(USERS_FILE, []))
+def _users_save(s: set): _save(USERS_FILE, sorted(list(s)))
+def _touch_user(uid: int):
+    s = _users()
+    if uid not in s:
+        s.add(uid)
+        _users_save(s)
+        _append_event("user_new", uid)
+@bot.message_handler(content_types=['text','photo','document','video','audio','voice','sticker','location','contact'])
+def __seen__(m):
+    try:
+        _touch_user(int(m.from_user.id))
+        _append_event("msg", m.from_user.id, {"type": m.content_type, "text": (m.text or "")[:120]})
+    except:
+        pass
+
+# --- coupons ---
+def _coupons(): return _load(COUPON_FILE, {})
+def _coupons_save(d): _save(COUPON_FILE, d)
+
+def add_coupon(uid:int, amount:float):
+    d = _coupons()
+    bal = float(d.get(str(uid), 0))
+    bal = round(bal + float(amount), 2)
+    d[str(uid)] = bal
+    _coupons_save(d)
+    return bal
+
+def get_coupon(uid:int) -> float:
+    return float(_coupons().get(str(uid), 0))
+
+# --- invites (via /start <ref>) ---
+def _invites():
+    d = _load(INVITES_FILE, {})
+    d.setdefault("ref_map", {})
+    d.setdefault("count", {})
+    return d
+
+def _invites_save(d): _save(INVITES_FILE, d)
+
+def register_invite(invitee:int, referrer:int):
+    if invitee == referrer: return
+    d = _invites()
+    if str(invitee) in d["ref_map"]: return
+    d["ref_map"][str(invitee)] = int(referrer)
+    d["count"][str(referrer)] = int(d["count"].get(str(referrer), 0)) + 1
+    _invites_save(d)
+    _append_event("invited", invitee, {"referrer": int(referrer)})
+
+@bot.message_handler(commands=['start'])
+def __capture_ref__(m):
+    try:
+        parts = m.text.strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[1].isdigit():
+            register_invite(int(m.from_user.id), int(parts[1]))
+    except:
+        pass
+    # your own /start handler will also run (telebot chains them)
+
+# --- helpers ---
+def _new_id(prefix="p"): return f"{prefix}{int(time.time()*1000)}"
+
+def parse_number(s: str) -> float:
+    s = s.strip().upper().replace("AMD","").replace("USD","").replace("֏","")
+    s = s.replace(",", "").replace(" ", "")
+    if not re.match(r"^-?\d+(\.\d+)?$", s):
+        raise ValueError("number")
+    return float(s)
+
+def _today_range():
+    dt = datetime.now()
+    start = int(datetime(dt.year, dt.month, dt.day).timestamp())
+    end   = start + 86400
+    return start, end
+
+# --- payments store ---
+def _pays(): return _load(PAY_FILE, {})
+def _pays_save(d): _save(PAY_FILE, d)
+
+# --------------------------- USER: /pay FLOW ---------------------------
+USER_STATE = {}
+
+@bot.message_handler(commands=['pay'])
+def pay_start(m):
+    USER_STATE[m.from_user.id] = {"mode":"price"}
+    bot.reply_to(m, "🧾 Գրիր **ապրանքի գինը** (AMD). Օր.`1240`։\n/cancel՝ չեղարկել")
+
+@bot.message_handler(commands=['cancel'])
+def pay_cancel(m):
+    if USER_STATE.pop(m.from_user.id, None) is not None:
+        bot.reply_to(m, "❎ Չեղարկվեց։")
+
+@bot.message_handler(func=lambda m: USER_STATE.get(m.from_user.id,{}).get("mode")=="price", content_types=['text'])
+def pay_price(m):
+    try:
+        price = parse_number(m.text)
+        USER_STATE[m.from_user.id] = {"mode":"sent", "price": price}
+        bot.reply_to(m, "💰 Գրիր **փոխանցած գումարը** (AMD). Օր.`1300`։")
+    except:
+        bot.reply_to(m, "Քանակը գրիր թվերով, օրինակ `1240`։")
+
+@bot.message_handler(func=lambda m: USER_STATE.get(m.from_user.id,{}).get("mode")=="sent", content_types=['text'])
+def pay_sent(m):
+    st = USER_STATE.get(m.from_user.id, {})
+    try:
+        sent = parse_number(m.text)
+        st["sent"] = sent
+        st["mode"] = "receipt"
+        USER_STATE[m.from_user.id] = st
+        bot.reply_to(m, "📎 Ուղարկիր **անդորագիրը** (ֆոտո կամ փաստաթուղթ)։\n/cancel՝ չեղարկել")
+    except:
+        bot.reply_to(m, "Քանակը գրիր թվերով, օրինակ `1300`։")
+
+@bot.message_handler(func=lambda m: USER_STATE.get(m.from_user.id,{}).get("mode")=="receipt", content_types=['photo','document'])
+def pay_receipt(m):
+    st = USER_STATE.get(m.from_user.id, {})
+    price = float(st.get("price",0))
+    sent  = float(st.get("sent",0))
+    pay_id = _new_id("pay_")
+    fkind = m.content_type
+    fid   = m.photo[-1].file_id if fkind=='photo' else m.document.file_id
+
+    d = _pays()
+    d[pay_id] = {
+        "id": pay_id,
+        "user_id": int(m.from_user.id),
+        "username": m.from_user.username,
+        "price": price,
+        "sent": sent,
+        "overpay": round(max(0, sent-price), 2),
+        "file_kind": fkind,
+        "file_id": fid,
+        "status": "pending",
+        "ts": int(time.time())
+    }
+    _pays_save(d)
+    USER_STATE.pop(m.from_user.id, None)
+    _append_event("payment_created", m.from_user.id, {"id":pay_id,"price":price,"sent":sent})
+
+    bot.reply_to(m, f"✅ Վճարման հայտը գրանցվեց №`{pay_id}`։ Ադմինը կհաստատի մոտակայում։", parse_mode="Markdown")
+
+    # notify admins
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("👁 Տեսված",   callback_data=f"pay:seen:{pay_id}"),
+        types.InlineKeyboardButton("✅ Հաստատել", callback_data=f"pay:ok:{pay_id}"),
+        types.InlineKeyboardButton("❌ Մերժել",   callback_data=f"pay:no:{pay_id}")
+    )
+    cap = (f"💳 Նոր վճարում #{pay_id}\n"
+           f"• From: @{m.from_user.username or m.from_user.id}\n"
+           f"• Price: {price}֏ | Sent: {sent}֏\n"
+           f"• Overpay→Coupon: {round(max(0, sent-price),2)}֏")
+    # try all admin sources we know
+    admin_ids = set()
+    try:
+        admin_ids |= set(int(x) for x in ADMIN_IDS)  # type: ignore
+    except: pass
+    try:
+        admin_ids |= set(int(x) for x in admin_list)  # type: ignore
+    except: pass
+    try:
+        admin_ids.add(int(ADMIN_ID))  # type: ignore
+    except: pass
+    for aid in admin_ids:
+        try:
+            if fkind=='photo':   bot.send_photo(aid, fid, caption=cap, reply_markup=kb)
+            else:               bot.send_document(aid, fid, caption=cap, reply_markup=kb)
+        except: pass
+
+@bot.callback_query_handler(func=lambda q: q.data.startswith("pay:"))
+def cb_pay(q):
+    if not is_admin(q): 
+        bot.answer_callback_query(q.id, "⛔️"); 
+        return
+    _, act, pid = q.data.split(":")
+    d = _pays(); rec = d.get(pid)
+    if not rec:
+        bot.answer_callback_query(q.id, "Չկա հայտը"); 
+        return
+
+    if act=="seen":
+        if rec.get("status")=="pending":
+            rec["status"]="seen"; _pays_save(d); _append_event("payment_seen", q.from_user.id, {"id":pid})
+        bot.answer_callback_query(q.id, "Տեսված 👁"); 
+        return
+
+    if act=="ok":
+        if rec.get("status") in ("pending","seen"):
+            rec["status"]="approved"; _pays_save(d)
+            _append_event("payment_approved", q.from_user.id, {"id":pid})
+            over = float(rec.get("overpay",0))
+            if over>0:
+                new_bal = add_coupon(int(rec["user_id"]), over)
+                try:
+                    bot.send_message(rec["user_id"], f"✅ Վճարումը հաստատվեց (№{pid}). Ավելցուկ {over}֏ → կուպոններ։ Նոր մնացորդ՝ {new_bal}֏.")
+                except: pass
+            else:
+                try:
+                    bot.send_message(rec["user_id"], f"✅ Ձեր վճարումը հաստատվեց (№{pid}).")
+                except: pass
+        bot.answer_callback_query(q.id, "Հաստատվեց ✅"); 
+        return
+
+    if act=="no":
+        if rec.get("status") in ("pending","seen"):
+            rec["status"]="declined"; _pays_save(d)
+            _append_event("payment_declined", q.from_user.id, {"id":pid})
+            try:
+                bot.send_message(rec["user_id"], f"❌ Վճարումը մերժվեց (№{pid}). Կապ հաստատեք օպերատորի հետ։")
+            except: pass
+        bot.answer_callback_query(q.id, "Մերժվեց ❌"); 
+        return
+
+# manual admin confirm (optional fallback)
+@bot.message_handler(commands=['confirm_payment'])
+def confirm_payment(m):
+    if not is_admin(m): return
+    parts = m.text.split()
+    if len(parts)<4:
+        bot.reply_to(m, "Օգտագործում՝ /confirm_payment user_id amount_sent amount_expected")
+        return
+    try:
+        uid = int(parts[1])
+        sent = float(parts[2]); expected = float(parts[3])
+    except:
+        bot.reply_to(m, "Թվերը ճիշտ նշիր․ օրինակ `/confirm_payment 123 1300 1240`")
+        return
+    over = max(0.0, sent-expected)
+    if over>0:
+        new_bal = add_coupon(uid, over)
+    else:
+        new_bal = get_coupon(uid)
+    try:
+        txt=(f"✅ Ձեր վճարումը հաստատվեց։\n"
+             f"📦 Գինը՝ {expected}֏ | 💸 Փոխանցած՝ {sent}֏")
+        if over>0: txt+=f"\n🎁 Ավել {over}֏ → կուպոններ։ Նոր մնացորդ՝ {new_bal}֏"
+        bot.send_message(uid, txt)
+    except: pass
+    bot.reply_to(m, f"OK. User {uid} overpay={over}֏, coupons={new_bal}֏")
+
+# quick lists
+@bot.message_handler(commands=['payments'])
+def list_pending(m):
+    if not is_admin(m): return
+    d=_pays()
+    arr=[v for v in d.values() if v.get("status") in ("pending","seen")]
+    arr=sorted(arr, key=lambda x:x["ts"], reverse=True)[:20]
+    if not arr:
+        bot.reply_to(m, "💳 Սպասող վճարումներ չկան։"); return
+    lines=[f"• #{p['id']}  {p['price']}→{p['sent']} (over {p['overpay']})  @{p.get('username') or p['user_id']}" for p in arr]
+    bot.reply_to(m, "💳 Վերջին սպասող վճարներ\n"+"\n".join(lines))
+
+# coupons commands
+@bot.message_handler(commands=['my_coupons'])
+def my_coupons(m):
+    bot.reply_to(m, f"🎟 Ձեր կուպոնների մնացորդը՝ {get_coupon(int(m.from_user.id))}֏")
+
+@bot.message_handler(commands=['coupons'])
+def admin_coupons(m):
+    if not is_admin(m): return
+    parts = m.text.split()
+    if len(parts)==1:
+        bot.reply_to(m, "Օգտագործում՝ `/coupons <user_id> [add X|sub X]`", parse_mode="Markdown"); return
+    uid = int(parts[1])
+    if len(parts)==2:
+        bot.reply_to(m, f"User {uid} → {get_coupon(uid)}֏"); return
+    op = parts[2].lower(); amt = float(parts[3])
+    if op=="add": nb=add_coupon(uid, amt)
+    elif op=="sub": nb=add_coupon(uid, -amt)
+    else: bot.reply_to(m, "Օգտագործում՝ add/sub"); return
+    bot.reply_to(m, f"OK. User {uid} նոր մնացորդ՝ {nb}֏")
+
+# admin “send receipt” (free message to user)
+@bot.message_handler(commands=['send_receipt'])
+def admin_send_receipt(m):
+    if not is_admin(m): return
+    parts = m.text.split(maxsplit=2)
+    if len(parts)<3:
+        bot.reply_to(m, "Օգտագործում՝ /send_receipt USER_ID ՏԵԿՍՏ")
+        return
+    try:
+        uid=int(parts[1])
+    except:
+        bot.reply_to(m, "USER_ID-ը թիվ պետք է լինի"); return
+    txt = parts[2]
+    try:
+        bot.send_message(uid, "📩 Ադմինի հաղորդագրություն\n\n"+txt)
+        bot.reply_to(m, "✅ Ուղարկվեց")
+    except Exception as e:
+        bot.reply_to(m, f"Չստացվեց ուղարկել՝ {e}")
+
+# --- stats / dashboard ---
+BOT_START_TS = time.time()
+def _uptime():
+    s=int(time.time()-BOT_START_TS); h=s//3600; m=(s%3600)//60; ss=s%60
+    return f"{h:02d}:{m:02d}:{ss:02d}"
+
+def _today_stats():
+    s,e=_today_range()
+    users_new=0; pay_cnt=0; pay_sum=0.0; over_sum=0.0
+    try:
+        with open(EVENTS_FILE,"r",encoding="utf-8") as f:
+            for line in f:
+                j=json.loads(line)
+                ts=int(j.get("ts",0))
+                if not(s<=ts<e): continue
+                k=j.get("kind")
+                if k=="user_new": users_new+=1
+                elif k=="payment_created":
+                    pay_cnt+=1
+                    meta=j.get("meta",{})
+                    pay_sum += float(meta.get("sent",0))
+                    over_sum+= max(0.0, float(meta.get("sent",0)) - float(meta.get("price",0)))
+    except: pass
+    pend=len([1 for v in _pays().values() if v.get("status") in ("pending","seen")])
+    return {"users_new":users_new,"pay_cnt":pay_cnt,"pay_sum":round(pay_sum,2),"over_sum":round(over_sum,2),"pending":pend}
+
+def _admin_kb():
+    kb=types.ReplyKeyboardMarkup(resize_keyboard=True,row_width=2)
+    kb.add("🧭 Դեշբորդ","💳 Սպասող վճարումներ","📊 Օրվա վիճակագրություն")
+    kb.add("📢 Broadcast","📜 Լոգեր","⬅️ Գլխավոր մենյու")
+    return kb
+
+@bot.message_handler(commands=['admin'])
+def admin_panel(m):
+    if not is_admin(m): return
+    bot.send_message(m.chat.id,
+        f"👑 Admin panel\n• Users: {len(_users())}\n• Uptime: {_uptime()}\n• Data: ./data/",
+        reply_markup=_admin_kb())
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text=="📊 Օրվա վիճակագրություն")
+def btn_stats_today(m):
+    s=_today_stats()
+    bot.reply_to(m,
+        f"📊 Այսօր\n• Նոր user-ներ: {s['users_new']}\n• Վճարումներ: {s['pay_cnt']} (գումար {s['pay_sum']}֏)\n"
+        f"• Կուպոն ավելացումներ: {s['over_sum']}֏\n• Սպասող վճարումներ: {s['pending']}")
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text=="💳 Սպասող վճարումներ")
+def btn_pending(m): list_pending(m)
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text=="🧭 Դեշբորդ")
+def btn_dash(m):
+    s=_today_stats()
+    bot.reply_to(m,
+        f"🧭 Դեշբորդ\n• Այսօր նոր user: {s['users_new']}\n• Սպասող վճարումներ: {s['pending']}\n"
+        f"• Վճարումներ (քանակ/գումար): {s['pay_cnt']} / {s['pay_sum']}֏\n• Կուպոն ավելցուկ: {s['over_sum']}֏\n"
+        f"• Ընդհանուր user-ներ: {len(_users())}")
+
+# --- broadcast to all users ---
+ADMIN_STATE={}
+@bot.message_handler(commands=['broadcast'])
+def bc_start(m):
+    if not is_admin(m): return
+    ADMIN_STATE[m.from_user.id]={"mode":"broadcast"}
+    bot.reply_to(m, "✍️ Ուղարկիր հաղորդագրությունը բոլոր user-ներին։ /cancel՝ դադարեցնել")
+
+@bot.message_handler(func=lambda m: is_admin(m) and ADMIN_STATE.get(m.from_user.id,{}).get("mode")=="broadcast",
+                     content_types=['text','photo','video','document','audio','voice','sticker'])
+def bc_go(m):
+    users=_users(); sent=0; fail=0
+    for uid in list(users):
+        try:
+            if   m.content_type=='text': bot.send_message(uid, m.text)
+            elif m.content_type=='photo': bot.send_photo(uid, m.photo[-1].file_id, caption=m.caption or "")
+            elif m.content_type=='video': bot.send_video(uid, m.video.file_id, caption=m.caption or "")
+            elif m.content_type=='document': bot.send_document(uid, m.document.file_id, caption=m.caption or "")
+            elif m.content_type=='audio': bot.send_audio(uid, m.audio.file_id, caption=m.caption or "")
+            elif m.content_type=='voice': bot.send_voice(uid, m.voice.file_id)
+            elif m.content_type=='sticker': bot.send_sticker(uid, m.sticker.file_id)
+            sent+=1; time.sleep(0.03)
+        except:
+            fail+=1
+    ADMIN_STATE.pop(m.from_user.id, None)
+    bot.reply_to(m, f"📢 Ուղարկվեց՝ {sent}, չհասավ՝ {fail}")
+
+# --- logs dump (last 300) ---
+@bot.message_handler(commands=['logs'])
+def send_logs(m):
+    if not is_admin(m): return
+    N=300; lines=[]
+    if os.path.exists(EVENTS_FILE):
+        with open(EVENTS_FILE,"r",encoding="utf-8") as f: lines=f.readlines()[-N:]
+    path=os.path.join(DATA_DIR,"events_last.txt")
+    with open(path,"w",encoding="utf-8") as f: f.writelines(lines)
+    with open(path,"rb") as f:
+        bot.send_document(m.chat.id,f,visible_file_name="events_last.txt",
+                          caption=f"Վերջին {len(lines)} իրադարձություն")
+# =================== END ADMIN BLOCK ===================
+# --- Webhook setup ---
+def set_webhook():
+    try:
+        # remove old
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=10)
+
+        # set new
+        r = requests.get(
+            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+            params={"url": WEBHOOK_URL, "drop_pending_updates": True},
+            timeout=10,
+        )
+        print("setWebhook:", r.json())
+    except Exception as e:
+        print("Webhook error:", e)
+
+
 # ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
 from config import BOT_TOKEN
 def to_int(val):
@@ -23,11 +500,7 @@ def to_int(val):
 
 
 # --- Config / Bot ---
-TOKEN = "7198636747:AAEUNsaiMZXweWcLZoQcxocZKKLhxapCszM"  # եթե արդեն վերևում ունես, սա պահիր նույնը
-ADMIN_ID = 6822052289
-admin_list = [ADMIN_ID]
 
-bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
 # ---------------- Products loader ----------------
 def load_products(folder="products"):
@@ -471,10 +944,75 @@ def invite_friend(message):
 {invite_link}
 """)
 
-@bot.message_handler(commands=["start"])
-def on_start(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
+# --- Persistent customer counter (stored on disk) ---
+import os
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+COUNTER_FILE = os.path.join(DATA_DIR, "customer_counter.txt")
+
+def load_counter():
+    try:
+        with open(COUNTER_FILE, "r", encoding="utf-8") as f:
+            return int(f.read().strip() or "0")
+    except Exception:
+        return 0
+
+def save_counter(v: int):
+    try:
+        with open(COUNTER_FILE, "w", encoding="utf-8") as f:
+            f.write(str(v))
+    except Exception:
+        pass
+
+customer_counter = load_counter()
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    # વધારો հաշվիչը և պահիր
+    global customer_counter
+    customer_counter += 1
+    save_counter(customer_counter)
+    customer_no = customer_counter
+
+    # === Նոր ողջույնի տեքստ ===
+    welcome_text = (
+        "🐰🌸 Բարի գալուստ BabyAngels 🛍️✨\n\n"
+        "💖 Շնորհակալ ենք, որ միացել եք մեր սիրելի ընտանիքին ❤️\n"
+        f"Դուք այժմ մեր սիրելի հաճախորդն եք №{customer_no} ✨\n"
+        "Մեր խանութում կարող եք գտնել ամեն օր օգտակար ապրանքների գծով լավագույն գները։\n\n"
+        "🎁 Ակտիվ շանս՝ առաջին գնմանց հետո կստանաք 10% զեղչ հաջորդ պատվերի համար։\n\n"
+        "📦 Ի՞նչ կգտնեք այստեղ\n"
+        "• Ժամանակին և օգտակար ապրանքներ՝ ամեն օր թարմացվող տեսականիով\n"
+        "• Լոյալ ակցիաներ և արագ արձագանք Telegram աջակցությամբ\n"
+        "• Հարմարեցված և արագ առաքում 🚚\n\n"
+        "💳 Փոխարկման ծառայություններ\n"
+        "• PI ➜ USDT (շուկայական կուրս, +20% սպասարկում)\n"
+        "• FTN ➜ AMD (միայն 10% սպասարկում)\n"
+        "• Alipay լիցքավորում (1 CNY = 58֏)\n\n"
+        "✨ Ավելի արագ՝ պարզապես ուղարկեք հարցը ներքևում 👇"
+    )
+
+    # Փորձում ենք ուղարկել նապաստակի նկարը, չլինելու դեպքում՝ միայն տեքստ
+    try:
+        img_path = os.path.join(os.path.dirname(__file__), "media", "bunny.jpg")
+        if os.path.exists(img_path):
+            with open(img_path, "rb") as ph:
+                bot.send_photo(
+                    message.chat.id, ph,
+                    caption=welcome_text,
+                    reply_markup=main_menu_markup() if 'main_menu_markup' in globals() else None
+                )
+        else:
+            bot.send_message(
+                message.chat.id, welcome_text,
+                reply_markup=main_menu_markup() if 'main_menu_markup' in globals() else None
+            )
+    except Exception:
+        bot.send_message(
+            message.chat.id, welcome_text,
+            reply_markup=main_menu_markup() if 'main_menu_markup' in globals() else None
+        )
+
 
     # ակտիվացնենք առաջին գնումի բոնուսը (եթե պետք է)
     ensure_first_order_bonus(user_id)
@@ -966,23 +1504,336 @@ def telegram_webhook():
     update = request.get_data().decode("utf-8")
     bot.process_new_updates([telebot.types.Update.de_json(update)])
     return "ok", 200
+# ========= Admin & Payments – FULL BLOCK (paste below bot = TeleBot(...)) =========
 
-def set_webhook():
+def is_admin(message) -> bool:
     try:
-        # remove old
-        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
-        # set new
-        r = requests.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            params={"url": WEBHOOK_URL, "drop_pending_updates": True},
-            timeout=10,
-        )
-        print("setWebhook:", r.json())
-    except Exception as e:
-        print("setWebhook error:", e)
-@app.route("/")
-def home():
-    return "Bot is running!"
+        return int(message.from_user.id) in ADMIN_IDS
+    except Exception:
+        return False
 
+# --- very small in-memory storage (DB չկա) ---
+USERS = {}              # user_id -> dict(name, username, coupons)
+COUPONS = {}            # user_id -> coupons_balance (float / int)
+PENDING_PAYMENTS = {}   # payment_id -> dict(user_id, price, sent, overpay, note, photo_file_id, status)
+EVENTS = []             # լոգերի փոքր պատմություն admin-ի համար
+_ID_SEQ = 1000          # payment seq
+
+def _log(event: str):
+    EVENTS.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {event}")
+    if len(EVENTS) > 300:
+        del EVENTS[:100]
+
+def _register_user(m):
+    uid = m.from_user.id
+    if uid not in USERS:
+        USERS[uid] = {
+            "name": f"{m.from_user.first_name or ''} {m.from_user.last_name or ''}".strip(),
+            "username": (m.from_user.username or ""),
+        }
+        COUPONS.setdefault(uid, 0)
+        _log(f"👤 New user: {uid} @{USERS[uid]['username']} {USERS[uid]['name']}")
+
+# --- helpers ---
+def send_admin(text, **kw):
+    for aid in ADMIN_IDS:
+        try:
+            bot.send_message(aid, text, **kw)
+        except Exception:
+            pass
+
+# =======================  ADMIN MENU  =======================
+@bot.message_handler(commands=['whoami'])
+def whoami(message):
+    _register_user(message)
+    bot.reply_to(message, f"👤 Քո ID-ն՝ `{message.from_user.id}`")
+
+@bot.message_handler(commands=['admin'])
+def admin_menu(message):
+    if not is_admin(message):
+        return
+    mk = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    mk.add("📊 Վիճակագրություն", "🧾 Վճարումներ")
+    mk.add("🎁 Կուպոններ", "🧑‍🤝‍🧑 Օգտատերեր")
+    mk.add("🧹 Մաքրել լոգերը", "🗒 Լոգեր (վերջին 30)")
+    bot.send_message(
+        message.chat.id,
+        "👑 Admin Panel — ընտրիր բաժինը",
+        reply_markup=mk
+    )
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text == "📊 Վիճակագրություն")
+def admin_stats(message):
+    users_count = len(USERS)
+    pend = sum(1 for p in PENDING_PAYMENTS.values() if p.get("status") == "pending")
+    conf = sum(1 for p in PENDING_PAYMENTS.values() if p.get("status") == "confirmed")
+    rej  = sum(1 for p in PENDING_PAYMENTS.values() if p.get("status") == "rejected")
+    bot.reply_to(message, f"📊 Օգտատերեր՝ {users_count}\n⏳ Սպասման մեջ՝ {pend}\n✅ Հաստատված՝ {conf}\n❌ Մերժված՝ {rej}")
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text == "🧾 Վճարումներ")
+def admin_payments(message):
+    if not PENDING_PAYMENTS:
+        bot.reply_to(message, "Դատարկ է։")
+        return
+    lines = []
+    for pid, p in sorted(PENDING_PAYMENTS.items()):
+        u = USERS.get(p["user_id"], {})
+        lines.append(
+            f"#{pid} | 👤 {p['user_id']} @{u.get('username','')} {u.get('name','')}\n"
+            f"    Գին: {p['price']} | Ուղարկված: {p['sent']} | Overpay: {p.get('overpay',0)}\n"
+            f"    Վիճակ: {p['status']}"
+        )
+    bot.reply_to(message, "🧾 Վճարումներ\n" + "\n".join(lines[:30]))
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text == "🎁 Կուպոններ")
+def admin_coupons(message):
+    if not COUPONS:
+        bot.reply_to(message, "Ոչ մի կուպոն դեռ չկա։")
+        return
+    lines = [f"👤 {uid}: {bal}" for uid, bal in COUPONS.items()]
+    bot.reply_to(message, "🎁 Կուպոնների մնացորդներ\n" + "\n".join(lines[:50]))
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text == "🧑‍🤝‍🧑 Օգտատերեր")
+def admin_users(message):
+    if not USERS:
+        bot.reply_to(message, "Օգտատերեր դեռ չեն եղել։")
+        return
+    lines = [f"{uid} @{u.get('username','')} {u.get('name','')}" for uid,u in USERS.items()]
+    bot.reply_to(message, "🧑‍🤝‍🧑 Օգտատերեր\n" + "\n".join(lines[:50]))
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text == "🧹 Մաքրել լոգերը")
+def admin_clear_logs(message):
+    EVENTS.clear()
+    bot.reply_to(message, "Լոգերը մաքրվեցին։")
+
+@bot.message_handler(func=lambda m: is_admin(m) and m.text == "🗒 Լոգեր (վերջին 30)")
+def admin_last_logs(message):
+    if not EVENTS:
+        bot.reply_to(message, "Լոգերը դատարկ են։")
+        return
+    bot.reply_to(message, "Վերջին իրադարձությունները:\n" + "\n".join(EVENTS[-30:]))
+
+# =======================  USER COUPONS  =======================
+@bot.message_handler(commands=['my_coupons'])
+def my_coupons(message):
+    _register_user(message)
+    bal = COUPONS.get(message.from_user.id, 0)
+    bot.reply_to(message, f"🎁 Քո կուպոնների մնացորդը՝ **{bal}**")
+
+# =======================  PAYMENT FLOW  =======================
+# /pay → enter price → enter sent amount → upload receipt (photo) → admin gets buttons
+PAY_FLOW = {}  # uid -> {"stage": "...", "price": , "sent": , "note": ""}
+
+@bot.message_handler(commands=['pay'])
+def cmd_pay(message):
+    _register_user(message)
+    PAY_FLOW[message.from_user.id] = {"stage": "price"}
+    bot.reply_to(message, "💳 Նշիր ապրանքի գինը (AMD)՝ օրինակ `1240`")
+
+@bot.message_handler(func=lambda m: m.from_user.id in PAY_FLOW and PAY_FLOW[m.from_user.id]["stage"] == "price")
+def flow_get_price(message):
+    try:
+        price = float(str(message.text).strip())
+        PAY_FLOW[massage.from_user.id]  # intentional error? NO! fix
+    except Exception:
+        bot.reply_to(message, "Թիվ գրի, օրինակ `1240`")
+        return
+    PAY_FLOW[message.from_user.id]["price"] = price
+    PAY_FLOW[message.from_user.id]["stage"] = "sent"
+    bot.reply_to(message, "✉️ Գրիր՝ իրականում որքան ես փոխանցել (AMD)՝ օրինակ `1300`։\nԿարող ես նաև տեքստով նշել հաշվի ստացող/պլատֆորմը։")
+
+@bot.message_handler(func=lambda m: m.from_user.id in PAY_FLOW and PAY_FLOW[m.from_user.id]["stage"] == "sent")
+def flow_get_sent(message):
+    # պահում ենք նաև user's note-ը
+    txt = str(message.text)
+    nums = "".join(ch if ch.isdigit() or ch == "." else " " for ch in txt).split()
+    if not nums:
+        bot.reply_to(message, "Գրիր թիվը՝ օրինակ `1300`")
+        return
+    sent = float(nums[0])
+    PAY_FLOW[message.from_user.id]["sent"] = sent
+    # մնացածը՝ որպես նշում
+    note = txt if len(nums) == 1 else txt.replace(nums[0], "", 1).strip()
+    PAY_FLOW[message.from_user.id]["note"] = note
+    PAY_FLOW[message.from_user.id]["stage"] = "wait_receipt"
+    bot.reply_to(message, "📸 Ուղարկիր փոխանցման անդորագրի ՍՔՐԻՆ/ԼՈՒՍԱՆԿԱՐԸ (photo)")
+
+@bot.message_handler(content_types=['photo'])
+def on_photo(message):
+    uid = message.from_user.id
+    if uid not in PAY_FLOW or PAY_FLOW[uid].get("stage") != "wait_receipt":
+        # Եթե սա անդորագիր չի, պարզապես գրանցենք user-ը ու դուրս գանք
+        _register_user(message)
+        return
+
+    # պահենք file_id-ը
+    file_id = message.photo[-1].file_id
+    data = PAY_FLOW[uid]
+    price = data["price"]
+    sent  = data["sent"]
+    over  = max(0, sent - price)
+    note  = data.get("note", "")
+
+    global _ID_SEQ
+    _ID_SEQ += 1
+    pid = _ID_SEQ
+
+    PENDING_PAYMENTS[pid] = {
+        "user_id": uid,
+        "price": price,
+        "sent": sent,
+        "overpay": over,
+        "note": note,
+        "photo_file_id": file_id,
+        "status": "pending",
+        "created_at": datetime.now().isoformat(timespec="seconds")
+    }
+    del PAY_FLOW[uid]
+
+    # ուղարկենք ադմիններին հաստատման կոճակներով
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton(text="✅ Հաստատել", callback_data=f"pay_ok:{pid}"),
+        types.InlineKeyboardButton(text="❌ Մերժել",  callback_data=f"pay_no:{pid}")
+    )
+    u = USERS.get(uid, {})
+    caption = (
+        f"🧾 Վճարման անդորագիր #{pid}\n"
+        f"👤 {uid} @{u.get('username','')} {u.get('name','')}\n"
+        f"Գին: {price} | Ուղարկված: {sent} | Overpay: {over}\n"
+        f"Նշում: {note or '—'}"
+    )
+    for aid in ADMIN_IDS:
+        try:
+            bot.send_photo(aid, file_id, caption=caption, reply_markup=kb)
+        except Exception:
+            pass
+
+    bot.reply_to(message, f"✅ Անդորագիրը ուղարկվեց ադմինին։ Հաստատման սպասում… (#`{pid}`)")
+    _log(f"🧾 Payment #{pid} from {uid}: price={price} sent={sent} over={over}")
+
+@bot.callback_query_handler(func=lambda c: c.data and (c.data.startswith("pay_ok:") or c.data.startswith("pay_no:")))
+def on_payment_decision(call):
+    if call.from_user.id not in ADMIN_IDS:
+        bot.answer_callback_query(call.id, "Միայն ադմինի համար է։", show_alert=True)
+        return
+    action, raw = call.data.split(":", 1)
+    pid = int(raw)
+    payment = PENDING_PAYMENTS.get(pid)
+    if not payment:
+        bot.answer_callback_query(call.id, "Գործարքը չի գտնվել։", show_alert=True)
+        return
+
+    if action == "pay_ok":
+        payment["status"] = "confirmed"
+        over = float(payment.get("overpay", 0))
+        if over > 0:
+            COUPONS[payment["user_id"]] = COUPONS.get(payment["user_id"], 0) + over
+        bot.edit_message_caption(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            caption=call.message.caption + "\n\n✅ ՀԱՍՏԱՏՎԱԾ",
+            reply_markup=None
+        )
+        # user-ին ծանուցում
+        try:
+            bot.send_message(payment["user_id"], f"✅ Քո վճարումը #`{pid}` հաստատվեց։ Overpay **{over}** → կուպոնների վրա։")
+        except Exception:
+            pass
+        _log(f"✅ Confirm #{pid} by admin {call.from_user.id}; over={over}")
+        bot.answer_callback_query(call.id, "Հաստատվեց ✅")
+
+    elif action == "pay_no":
+        payment["status"] = "rejected"
+        bot.edit_message_caption(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            caption=call.message.caption + "\n\n❌ ՄԵՐԺՎԱԾ",
+            reply_markup=None
+        )
+        try:
+            bot.send_message(payment["user_id"], f"❌ Քո վճարումը #`{pid}` մերժվեց։ Խնդրում ենք կրկին ստուգել տվյալները։")
+        except Exception:
+            pass
+        _log(f"❌ Reject #{pid} by admin {call.from_user.id}")
+        bot.answer_callback_query(call.id, "Մերժվեց ❌")
+
+# =======================  SIMPLE WEB ADMIN PAGES  =======================
+@app.route("/admin")
+def admin_panel():
+    pend = sum(1 for p in PENDING_PAYMENTS.values() if p.get("status") == "pending")
+    conf = sum(1 for p in PENDING_PAYMENTS.values() if p.get("status") == "confirmed")
+    rej  = sum(1 for p in PENDING_PAYMENTS.values() if p.get("status") == "rejected")
+    return f"""
+    <h1>👑 BabyAngelsBot · Admin Panel</h1>
+    <p>Users: {len(USERS)} | Pending: {pend} | Confirmed: {conf} | Rejected: {rej}</p>
+    <ul>
+        <li><a href='/admin/payments'>🧾 Վճարումներ</a></li>
+        <li><a href='/admin/coupons'>🎁 Կուպոններ</a></li>
+        <li><a href='/admin/users'>🧑‍🤝‍🧑 Օգտատերեր</a></li>
+        <li><a href='/admin/logs'>🗒 Լոգեր</a></li>
+    </ul>
+    """
+
+@app.route("/admin/payments")
+def web_payments():
+    rows = []
+    for pid, p in sorted(PENDING_PAYMENTS.items()):
+        rows.append(
+            f"<tr><td>#{pid}</td>"
+            f"<td>{p['user_id']}</td>"
+            f"<td>{p['price']}</td><td>{p['sent']}</td><td>{p.get('overpay',0)}</td>"
+            f"<td>{p['status']}</td><td>{p.get('created_at','')}</td></tr>"
+        )
+    body = "".join(rows) or "<tr><td colspan=7>Դատարկ է</td></tr>"
+    return f"<h2>🧾 Վճարումներ</h2><table border=1 cellpadding=6><tr><th>ID</th><th>User</th><th>Price</th><th>Sent</th><th>Over</th><th>Status</th><th>Time</th></tr>{body}</table>"
+
+@app.route("/admin/coupons")
+def web_coupons():
+    rows = [f"<tr><td>{uid}</td><td>{bal}</td></tr>" for uid, bal in COUPONS.items()]
+    body = "".join(rows) or "<tr><td colspan=2>Դատարկ է</td></tr>"
+    return f"<h2>🎁 Կուպոններ</h2><table border=1 cellpadding=6><tr><th>User</th><th>Balance</th></tr>{body}</table>"
+
+@app.route("/admin/users")
+def web_users():
+    rows = []
+    for uid, u in USERS.items():
+        rows.append(f"<tr><td>{uid}</td><td>@{u.get('username','')}</td><td>{u.get('name','')}</td><td>{COUPONS.get(uid,0)}</td></tr>")
+    body = "".join(rows) or "<tr><td colspan=4>Դատարկ է</td></tr>"
+    return f"<h2>🧑‍🤝‍🧑 Օգտատերեր</h2><table border=1 cellpadding=6><tr><th>User</th><th>Username</th><th>Name</th><th>Coupons</th></tr>{body}</table>"
+
+@app.route("/admin/logs")
+def web_logs():
+    body = "<br>".join(EVENTS[-200:]) if EVENTS else "Դատարկ է"
+    return f"<h2>🗒 Վերջին իրադարձություններ</h2><div style='white-space:pre-wrap;font-family:monospace'>{body}</div>"
+
+# ========= /END of Admin & Payments FULL BLOCK =========
+
+# 👤 Հաճախորդներ
+# --- Flask routes ---
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!", 200
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    if request.headers.get("content-type") == "application/json":
+        json_str = request.get_data().decode("utf-8")
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "", 200
+    else:
+        abort(403)
+print("Bot started successfully")
+
+# --- Start bot with POLLING (local run) ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # անջատում ենք webhook-ը, որ չմիջամտի polling-ին
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+
+    print("Bot is running with polling…")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
