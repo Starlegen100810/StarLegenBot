@@ -10,6 +10,9 @@ import telebot
 from telebot import types
 import requests
 from flask import Flask, request, abort
+from flask import Flask
+
+app = Flask(__name__) 
 # ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
 from config import BOT_TOKEN
 def to_int(val):
@@ -977,9 +980,9 @@ def set_webhook():
         print("setWebhook:", r.json())
     except Exception as e:
         print("setWebhook error:", e)
-if name == "main":
-    print("Bot starting with WEBHOOK:", WEBHOOK_URL)
-    set_webhook()
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+@app.route("/")
+def home():
+    return "Bot is running!"
 
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
