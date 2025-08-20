@@ -1,34 +1,146 @@
-import os
-import re
-import time
-import json
-import glob
-import random
-import textwrap
-import threading
-import requests
+import os, re, time, json, glob, random, textwrap, threading, requests, hashlib, logging
 from datetime import datetime
 from flask import Flask, request, abort
 import telebot
 from telebot import types
+
+# ==================== BASE INFO ====================
+user_carts = {}  # {user_id: {code: qty}}
+cart_timers = {}
+
+STARTED_AT = time.strftime("%Y-%m-%d %H:%M:%S")
+FILE_PATH  = os.path.abspath(__file__)
+try:
+    FILE_HASH = hashlib.md5(open(__file__, "rb").read()).hexdigest()[:8]
+except Exception:
+    FILE_HASH = "nohash"
+
+# Flask + telebot logger
+telebot.logger.setLevel(logging.DEBUG)
 app = Flask(__name__)
 
-TOKEN    = os.getenv("BOT_TOKEN") or "7198636747:AAHnVEbRGQBkAomBYvHag3Nh_i7Tap6Lnac" 
-ADMIN_ID = int(os.getenv("ADMIN_ID") or "6822052289")      # քո user id
-# Single bot instance
-bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+# ==================== ENV & CONFIG ====================
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
-# Admin check
-ADMIN_IDS = {ADMIN_ID}
+# Bot token (prefer BOT_TOKEN, fallback TELEGRAM_BOT_TOKEN)
+TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN or ":" not in TOKEN:
+    raise Exception("BOT_TOKEN is not set (put it in .env)")
+
+# Admin IDs: ADMIN_IDS="123,456" or ADMIN_ID="123"
+_admin_env = os.getenv("ADMIN_IDS") or os.getenv("ADMIN_ID", "")
+ADMIN_IDS = {int(x) for x in _admin_env.replace(" ", "").split(",") if x.isdigit()}
+admin_list = list(ADMIN_IDS)
+
+# ==================== BOT INSTANCE ====================
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+# Make sure we're in polling mode (no webhook leftovers)
+bot.delete_webhook(drop_pending_updates=True)
+
+# If you ever use webhook hosting, keep the URL here (not used in polling)
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL  = f"https://babyangelsbot08.onrender.com{WEBHOOK_PATH}"
+
+# ==================== HELPERS ====================
+def is_admin(m) -> bool:
+    """Single unified admin check."""
+    try:
+        # custom helper if user had one
+        if '_is_admin' in globals():
+            try:
+                if _is_admin(m):
+                    return True
+            except:
+                pass
+        # set of ids
+        if 'ADMIN_IDS' in globals():
+            if int(m.from_user.id) in set(int(x) for x in ADMIN_IDS):
+                return True
+        # list of ids
+        if 'admin_list' in globals():
+            if int(m.from_user.id) in [int(x) for x in admin_list]:
+                return True
+        # single id compatibility
+        if 'ADMIN_ID' in globals():
+            if int(m.from_user.id) == int(ADMIN_ID):
+                return True
+    except:
+        pass
+    return False
+
+def calculate_cart_total(user_id: int) -> int:
+    total = 0
+    cart = user_carts.get(user_id, {})
+    for code, qty in cart.items():
+        price = int(PRODUCTS.get(code, {}).get("price", 0))
+        total += price * int(qty)
+    return total
+
+# --- quick diagnostics (/version, /where) ---
+@bot.message_handler(commands=['version','where'])
+def _version(m):
+    bot.reply_to(
+        m,
+        f"🧩 path: `{FILE_PATH}`\n"
+        f"📦 hash: `{FILE_HASH}`\n"
+        f"⏱ started: {STARTED_AT}",
+        parse_mode="Markdown"
+    )
+
+# ==================== files & dirs ====================
+BASE_DIR = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def calculate_cart_total(user_id: int) -> int:
+    total = 0
+    cart = user_carts.get(user_id, {})
+    for code, qty in cart.items():
+        price = int(PRODUCTS.get(code, {}).get("price", 0))
+        total += price * int(qty)
+    return total
+
+
+telebot.logger.setLevel(logging.DEBUG)
+app = Flask(__name__)
+
+# ---------- ENV & CONFIG ----------
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+# BOT TOKEN from .env (prefer BOT_TOKEN, fallback TELEGRAM_BOT_TOKEN)
+TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN or ":" not in TOKEN:
+    raise Exception("BOT_TOKEN is not set (use .env)")
+
+# Admin IDs: ADMIN_IDS="123,456" or ADMIN_ID="123"
+_admin_env = os.getenv("ADMIN_IDS") or os.getenv("ADMIN_ID", "")
+ADMIN_IDS = {int(x) for x in _admin_env.replace(" ", "").split(",") if x.isdigit()}
+admin_list = list(ADMIN_IDS)
+
 def is_admin(m) -> bool:
     try:
         return int(m.from_user.id) in ADMIN_IDS
     except Exception:
         return False
 
-# Webhook
+# Single bot instance
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+
+# Ensure polling mode (no webhook)
+bot.delete_webhook(drop_pending_updates=True)
+
+# Webhook (մնա, եթե պետք գա; polling-ը կաշխատի առանց դրա էլ)
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL  = f"https://babyangelsbot08.onrender.com{WEBHOOK_PATH}"
+
 
 # --- Config / Bot ---
 def is_admin(m) -> bool:
@@ -92,7 +204,7 @@ def _touch_user(uid: int):
     if uid not in s:
         s.add(uid)
         _users_save(s)
-        _append_event("user_new", uid)
+        _append_event("user_new", uid)  # event பதிவு
 @bot.message_handler(content_types=['text','photo','document','video','audio','voice','sticker','location','contact'])
 def __seen__(m):
     try:
@@ -133,8 +245,10 @@ def register_invite(invitee:int, referrer:int):
     d["count"][str(referrer)] = int(d["count"].get(str(referrer), 0)) + 1
     _invites_save(d)
     _append_event("invited", invitee, {"referrer": int(referrer)})
-
-@bot.message_handler(commands=['start'])
+@bot.message_handler(commands=['ping'])
+def _ping(m):
+    print(f"PING from {m.from_user.id}")
+    bot.reply_to(m, "pong")
 def __capture_ref__(m):
     try:
         parts = m.text.strip().split(maxsplit=1)
@@ -142,7 +256,6 @@ def __capture_ref__(m):
             register_invite(int(m.from_user.id), int(parts[1]))
     except:
         pass
-    # your own /start handler will also run (telebot chains them)
 
 # --- helpers ---
 def _new_id(prefix="p"): return f"{prefix}{int(time.time()*1000)}"
@@ -491,7 +604,6 @@ def set_webhook():
 
 
 # ---- helpers: safe int casting (avoid .isdigit on non-strings) ----
-from config import BOT_TOKEN
 def to_int(val):
     try:
         return int(str(val).strip())
@@ -638,6 +750,8 @@ def cart_subtotal_amd(user_id:int)->int:
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add::"))
 def add_to_cart(c):
+    user_id = c.from_user.id
+    cart_timers[user_id] = time.time()   # ← ԱՅՍ ՏՈՂԸ ԴՐԻՐ
     user_id = c.from_user.id
     code = c.data.split("::",1)[1]
     p = PRODUCTS.get(code)
@@ -966,15 +1080,60 @@ def save_counter(v: int):
 
 customer_counter = load_counter()
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    # વધારો հաշվիչը և պահիր
-    global customer_counter
-    customer_counter += 1
-    save_counter(customer_counter)
-    customer_no = customer_counter
+# ================== START + WELCOME (FINAL) ==================
 
-    # === Նոր ողջույնի տեքստ ===
+@bot.message_handler(commands=['start'])
+def start_handler(m: types.Message):
+    # միայն private chat-ում արձագանքենք (խմբում /start-ը չանենք)
+    if getattr(m.chat, "type", "") != "private":
+        return
+
+    print(f"START from {m.from_user.id}")
+
+    # referral parameter (օր. /start 12345)
+    try:
+        parts = (m.text or "").strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[1].isdigit():
+            register_invite(m.from_user.id, int(parts[1]))
+    except Exception:
+        pass
+
+    # Welcome UI
+    try:
+        send_welcome(m)
+    except Exception as e:
+        import traceback
+        print("send_welcome ERROR:", e)
+        print(traceback.format_exc())     
+
+def send_welcome(message: types.Message):
+    # 고객 համար (customer_no) — ապահով աճեցում, եթե ունես counter
+    customer_no = 0
+    try:
+        global customer_counter
+        customer_counter += 1
+        try:
+            save_counter(customer_counter)
+        except Exception:
+            pass
+        customer_no = customer_counter
+    except Exception:
+        # եթե չունես վերևի counter-ը, փորձի քո helper-ը
+        try:
+            customer_no = get_next_customer_no()
+        except Exception:
+            customer_no = 0
+
+    # ---- քո գլխավոր մենյուն
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("🛍 Խանութ", "🛒 Զամբյուղ")
+    markup.add("📦 Իմ պատվերները", "🎁 Կուպոններ")
+    markup.add("🔍 Որոնել ապրանք", "🎡 Բոնուս անիվ")
+    markup.add("🧍 Իմ էջը", "🏆 Լավագույններ")
+    markup.add("💱 Փոխարկումներ", "💬 Հետադարձ կապ")
+    markup.add("Հրավիրել ընկերների")
+
+    # ---- Քո ԱՆՉՓՈԽ ՈՂՋՈՒՅՆԻ ՏԵՔՍՏԸ (ճիշտ 그대로) ----
     welcome_text = (
         "🐰🌸 Բարի գալուստ BabyAngels 🛍️✨\n\n"
         "💖 Շնորհակալ ենք, որ միացել եք մեր սիրելի ընտանիքին ❤️\n"
@@ -992,72 +1151,31 @@ def send_welcome(message):
         "✨ Ավելի արագ՝ պարզապես ուղարկեք հարցը ներքևում 👇"
     )
 
-    # Փորձում ենք ուղարկել նապաստակի նկարը, չլինելու դեպքում՝ միայն տեքստ
+    # ---- ուղարկում լուսանկարով (եթե կա), այլապես՝ տեքստով
     try:
         img_path = os.path.join(os.path.dirname(__file__), "media", "bunny.jpg")
         if os.path.exists(img_path):
             with open(img_path, "rb") as ph:
                 bot.send_photo(
-                    message.chat.id, ph,
+                    message.chat.id,
+                    ph,
                     caption=welcome_text,
-                    reply_markup=main_menu_markup() if 'main_menu_markup' in globals() else None
+                    reply_markup=markup
                 )
         else:
-            bot.send_message(
-                message.chat.id, welcome_text,
-                reply_markup=main_menu_markup() if 'main_menu_markup' in globals() else None
-            )
+            bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
     except Exception:
-        bot.send_message(
-            message.chat.id, welcome_text,
-            reply_markup=main_menu_markup() if 'main_menu_markup' in globals() else None
-        )
+        bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
 
-
-    # ակտիվացնենք առաջին գնումի բոնուսը (եթե պետք է)
-    ensure_first_order_bonus(user_id)
-
-    # Գլխավոր մենյու
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🛍 Խանութ", "🛒 Զամբյուղ")
-    markup.add("📦 Իմ պատվերները", "🎁 Կուպոններ")
-    markup.add("🔍 Որոնել ապրանք", "🎡 Բոնուս անիվ")
-    markup.add("🧍 Իմ էջը", "🏆 Լավագույններ")
-    markup.add("💱 Փոխարկումներ", "💬 Հետադարձ կապ")
-    markup.add("Հրավիրել ընկերների")
-
-    # Հաճախորդի համար / user տվյալներ
-    customer_no = get_next_customer_no()
-    u = get_user(user_id)
-    first_bonus_active = (u.get("orders_count", 0) == 0 and not u.get("first_order_bonus_used", False))
-    bonus_pct = u.get("first_order_bonus_pct", 5)
-
-    # 📝 մարկետինգային ողջույն (միայն բառերը փոփոխված)
-    top = (
-        "🐰🌸 **Բարի գալուստ BabyAngels** 🛍️\n\n"
-        f"💖 Շնորհակալ ենք, որ ընտրեցիք մեզ ❤️ Դուք արդեն մեր սիրելի հաճախորդն եք՝ **№{customer_no}**։\n\n"
-    )
-    discount = (
-        f"🎁 **Լավ լուր․ առաջին պատվերի համար ունեք {bonus_pct}% զեղչ** — "
-        "կկիրառվի ավտոմատ վճարման պահին։\n\n"
-    ) if first_bonus_active else ""
-    body = (
-        "📦 Ինչ կգտնեք մեզ մոտ՝\n"
-        "• Ժամանակակից ու ոճային ապրանքներ ամեն օր թարմացվող տեսականուց\n"
-        "• Հատուկ ակցիաներ և անակնկալ առաջարկներ\n"
-        "• Անվճար առաքում Հայաստանի ողջ տարածքում\n\n"
-        "💱 Բացի խանութից՝ տրամադրում ենք հուսալի և արագ **փոխարկման ծառայություններ**՝\n"
-        "PI ➜ USDT | FTN ➜ AMD | Alipay ➜ CNY — միշտ շահավետ և արագ 🌟\n\n"
-        "👇 Ընտրեք բաժին և սկսեք գնումները հիմա"
-    )
-    welcome_text = top + discount + body
-
-    # Ուղարկում՝ լուսանկարով, եթե կա
+    # ըստ ցանկության՝ առաջին գնումի բոնուս/օգտատիրոջ state
     try:
-        with open("media/bunny.jpg", "rb") as photo:
-            bot.send_photo(chat_id, photo, caption=welcome_text, reply_markup=markup, parse_mode="Markdown")
-    except Exception:        
-        bot.send_message(chat_id, welcome_text, reply_markup=markup, parse_mode="Markdown")
+        if 'ensure_first_order_bonus' in globals():
+            ensure_first_order_bonus(message.from_user.id)
+    except Exception:
+        pass
+
+# ================== /END START + WELCOME ==================
+
         
 @bot.message_handler(func=lambda m: m.text and m.text.strip().endswith("Խանութ"))
 def open_shop(message):
@@ -1089,6 +1207,15 @@ MENU_HANDLERS = {
     "💬 Հետադարձ կապ": lambda m: bot.send_message(m.chat.id, "💬 Գրեք ձեր հարցը"),
     "Հրավիրել ընկերների": lambda m: bot.send_message(m.chat.id, "🤝 Հրավիրելու հղումը շուտով"),
 }
+def start(m):
+    # referral (օգտագործում ենք քո արդեն գրած helper-ը)
+    __capture_ref__(m)
+
+    # debug ձև, որ տեսնես հասնում է
+    _dbg_start(m)
+
+    # welcome UI և մնացածը
+    send_welcome(m)
 
 @bot.message_handler(func=lambda m: _norm(m.text) in {_norm(k) for k in MENU_HANDLERS})
 def _route_menu(message):
@@ -1300,12 +1427,15 @@ def back_shop(c):
 # ---------- Ավելացնել զամբյուղ (+1 fake sales և պահպանում JSON-ում)
 @bot.callback_query_handler(func=lambda c: c.data.startswith("add_"))
 def add_to_cart(c):
+    ...
+    cart_timers[c.from_user.id] = time.time()  # ← ԱՅՍ ՏՈՂԸ ԴՐԻՐ
+
     code = c.data.replace("add_", "")
     if code in PRODUCTS:
-        PRODUCTS[code]["fake_sales"] = PRODUCTS[code].get("fake_sales", 0) + 1
-        save_product(PRODUCTS[code])  # պահպանում ենք products/BAxxxxx.json-ում
+        user_carts.setdefault(c.from_user.id, {})
+        user_carts[c.from_user.id][code] = user_carts[c.from_user.id].get(code, 0) + 1
+        cart_timers[c.from_user.id] = time.time()
     bot.answer_callback_query(c.id, text="Ապրանքը ավելացվեց զամբյուղ 👌")
-
 
 # ---------------------- Քայլ 16. Ֆեյք վաճառքի քանակի պահպանում ----------------------
 
@@ -1634,7 +1764,7 @@ def cmd_pay(message):
 def flow_get_price(message):
     try:
         price = float(str(message.text).strip())
-        PAY_FLOW[massage.from_user.id]  # intentional error? NO! fix
+        PAY_FLOW[message.from_user.id]  # intentional error? NO! fix
     except Exception:
         bot.reply_to(message, "Թիվ գրի, օրինակ `1240`")
         return
@@ -1815,6 +1945,7 @@ def web_logs():
 def index():
     return "Bot is running!", 200
 
+# --- Webhook route (մնած, եթե Render-ում պետք գա) ---
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     if request.headers.get("content-type") == "application/json":
@@ -1824,16 +1955,40 @@ def webhook():
         return "", 200
     else:
         abort(403)
+
 print("Bot started successfully")
 
-# --- Start bot with POLLING (local run) ---
-if __name__ == "__main__":
-    # անջատում ենք webhook-ը, որ չմիջամտի polling-ին
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
+# --- Simple test commands (մի հատ /start թող՝ եթե ունես send_welcome վերը, դա comment կամ հանի՛ր) ---
+@bot.message_handler(commands=['id'])
+def _id(m):
+    bot.send_message(m.chat.id, f"🆔 Your ID: {m.from_user.id}")
 
-    print("Bot is running with polling…")
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+@bot.message_handler(content_types=['text','photo','sticker','video','document','audio','voice'])
+def _catch_all(m):
+    if getattr(m, "entities", None) and any(e.type == "bot_command" for e in m.entities):
+     return
+    if m.content_type == 'text':
+        bot.send_message(m.chat.id, f"📥 got: {m.text[:50]}")
+    else:
+        bot.send_message(m.chat.id, f"📥 got {m.content_type}")
+def start_cart_reminder():
+    def check():
+        while True:
+            now = time.time()
+            for uid, t0 in list(cart_timers.items()):
+                if now - t0 >= 24*3600:
+                    try:
+                        bot.send_message(uid, "🛒 Ձեր զամբյուղը սպասում է ձեզ 😊 Պատվերը ավարտե՛ք, իսկ հարցերի դեպքում գրե՛ք մեզ։")
+                    except:
+                        pass
+                    cart_timers.pop(uid, None)
+            time.sleep(3600)
+    threading.Thread(target=check, daemon=True).start()
+start_cart_reminder()
+
+if __name__ == "__main__":
+    bot.delete_webhook(drop_pending_updates=True)
+    print("Bot started successfully")
+    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+
 
