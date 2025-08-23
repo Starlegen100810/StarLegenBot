@@ -12,7 +12,6 @@ from datetime import datetime
 import telebot
 from telebot import types
 from flask import Flask
-# test auto push
 
 # ---------- ENV ----------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or ""
