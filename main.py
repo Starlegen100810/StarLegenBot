@@ -91,15 +91,9 @@ WELCOME_TEMPLATE = (
 
 def send_welcome(chat_id: int, customer_no: int):
     text = WELCOME_TEMPLATE.format(customer_no=customer_no)
-    # Փորձում ենք bunny.jpg-ը; եթե չկա, ուղարկում ենք միայն տեքստ
-    try:
-        banner_path = os.path.join(BASE_DIR, "media", "banners", "bunny.jpg")
-        with open(banner_path, "rb") as ph:
-            bot.send_photo(chat_id, ph, caption=text, reply_markup=build_main_menu())
-            return
-    except Exception:
-        pass
-    bot.send_message(chat_id, text, reply_markup=build_main_menu())
+    banner_path = os.path.join(BASE_DIR, "media", "banners", "bunny.jpg")
+    with open(banner_path, "rb") as ph:
+        bot.send_photo(chat_id, ph, caption=text, reply_markup=build_main_menu())
 
 # ---------- /start ----------
 @bot.message_handler(commands=["start"])
