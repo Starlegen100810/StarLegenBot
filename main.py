@@ -26,8 +26,9 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 COUNTER_FILE = os.path.join(DATA_DIR, "customer_counter.json")
 
-# Banner image (put your file here: media/banners/bunny.jpg)
-BANNER_PATH = os.path.join(BASE_DIR, "media", "banners", "bunny.jpg")
+# Banner image (same folder as main.py)
+BANNER_PATH = os.path.join(BASE_DIR, "bunny.jpg")
+
 
 def _load_counter() -> int:
     try:
