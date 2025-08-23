@@ -1,17 +1,17 @@
 # =========================
-# Starlegen minimal main.py
+# StarLegen — clean minimal main.py
 # Flask healthcheck + TeleBot polling (Render Web Service)
+# ~210 lines
 # =========================
-import os
-import json
-import time
-import threading
-import traceback
+import os, json, time, threading, traceback
 from datetime import datetime
-
 import telebot
 from telebot import types
 from flask import Flask
+from dotenv import load_dotenv
+
+# Load .env file variables
+load_dotenv()
 
 # ---------- ENV ----------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or ""
@@ -26,7 +26,10 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 COUNTER_FILE = os.path.join(DATA_DIR, "customer_counter.json")
 
-def _load_counter():
+# Banner image (put your file here: media/banners/bunny.jpg)
+BANNER_PATH = os.path.join(BASE_DIR, "media", "banners", "bunny.jpg")
+
+def _load_counter() -> int:
     try:
         with open(COUNTER_FILE, "r", encoding="utf-8") as f:
             obj = json.load(f)
@@ -49,7 +52,7 @@ def get_and_increment_customer_no() -> int:
 # ---------- BOT ----------
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 try:
-    # polling-ի համար՝ անջատել webhook-ը
+    # polling-ի համար՝ անջատել webhook-ը, եթե նախկինում եղել է
     bot.remove_webhook()
 except Exception as e:
     print("remove_webhook error:", e)
@@ -90,10 +93,15 @@ WELCOME_TEMPLATE = (
 )
 
 def send_welcome(chat_id: int, customer_no: int):
+    """Sends bunny.jpg + caption. If file missing, falls back to text (չի խափանում)."""
     text = WELCOME_TEMPLATE.format(customer_no=customer_no)
-    banner_path = os.path.join(BASE_DIR, "media", "banners", "bunny.jpg")
-    with open(banner_path, "rb") as ph:
-        bot.send_photo(chat_id, ph, caption=text, reply_markup=build_main_menu())
+    try:
+        with open(BANNER_PATH, "rb") as ph:
+            bot.send_photo(chat_id, ph, caption=text, reply_markup=build_main_menu())
+            return
+    except Exception as e:
+        print(f"[warn] bunny.jpg not found at {BANNER_PATH}: {e}")
+    bot.send_message(chat_id, text, reply_markup=build_main_menu())
 
 # ---------- /start ----------
 @bot.message_handler(commands=["start"])
@@ -101,14 +109,14 @@ def cmd_start(m: types.Message):
     customer_no = get_and_increment_customer_no()
     send_welcome(m.chat.id, customer_no)
 
-# ---------- SAFE STUB HANDLERS (to avoid crashes) ----------
+# ---------- SAFE STUB HANDLERS (all buttons reply safely) ----------
 @bot.message_handler(func=lambda m: m.text == "🛍 Խանութ")
 def h_shop(m: types.Message):
     safe_reply(m.chat.id, "🛍 Խանութ — շուտով կակտիվացնենք լիարժեք բաժինը։")
 
 @bot.message_handler(func=lambda m: m.text == "🛒 Զամբյուղ")
 def h_cart(m: types.Message):
-    safe_reply(m.chat.id, "🛒 Ձեր զամբյուղը դատարկ է (demo).")
+    safe_reply(m.chat.id, "🛒 Ձեր զամբյուղը դեռ դատարկ է (demo).")
 
 @bot.message_handler(func=lambda m: m.text == "📦 Իմ պատվերները")
 def h_orders(m: types.Message):
@@ -167,7 +175,7 @@ def run_bot():
     print(">> Starting polling thread…")
     while True:
         try:
-            print(">> Bot polling ON")
+            print(">> Bot polling ON", datetime.now().strftime("%H:%M:%S"))
             bot.infinity_polling(timeout=20, long_polling_timeout=20, skip_pending=True)
         except Exception as e:
             print("Polling crashed:", e)
