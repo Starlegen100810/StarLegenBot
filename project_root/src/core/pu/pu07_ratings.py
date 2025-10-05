@@ -137,6 +137,7 @@ def init(bot, resolve_lang, catalog, shop_state):
                 bot.flash(user_id, msg)
             else:
                 bot.send(user_id, msg)
+# synced from laptop ✅
 
 
 
