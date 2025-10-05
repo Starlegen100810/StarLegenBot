@@ -191,3 +191,5 @@ def register(bot, ctx):
     # ---------------- public API (imports use it) ----------------
     api = shop_state.setdefault("api", {})
     api["checkout_open"] = lambda uid, chat_id: open_checkout(bot, shop_state, uid, chat_id)
+# synced from phone ✅
+# synced from phone ✅
